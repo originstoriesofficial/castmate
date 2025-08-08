@@ -15,64 +15,89 @@ declare global {
   }
 }
 
-// Improved: Wait for user to say the cue word or click Next
+let recognitionInstance: any = null;
+
+function initRecognition(): any {
+  if (typeof window === 'undefined') return null;
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) return null;
+
+  if (!recognitionInstance) {
+    recognitionInstance = new SpeechRecognition();
+    recognitionInstance.continuous = true; // allow natural pauses
+    recognitionInstance.interimResults = false;
+    recognitionInstance.lang = 'en-US';
+  }
+  return recognitionInstance;
+}
+
 function waitForCue(cue: string, manualNextRef: React.MutableRefObject<boolean>): Promise<void> {
   return new Promise((resolve) => {
-    if (typeof window === 'undefined' || !(window.SpeechRecognition || window.webkitSpeechRecognition)) {
+    const recognition = initRecognition();
+    if (!recognition) {
       resolve();
       return;
     }
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = 'en-US';
 
-    let isRunning = false;
     let cueDetected = false;
+    let resolved = false;
 
-    const startRecognition = () => {
-      if (manualNextRef.current) {
-        if (isRunning) recognition.stop();
-        return;
-      }
-      if (!isRunning) {
-        recognition.start();
-        isRunning = true;
+    const stopAndResolve = () => {
+      if (!resolved) {
+        resolved = true;
+        recognition.stop();
+        resolve();
       }
     };
 
+    // Manual override watcher
+    const checkManualNext = () => {
+      if (manualNextRef.current) {
+        cueDetected = true;
+        stopAndResolve();
+      }
+    };
+
+    const manualCheckInterval = setInterval(checkManualNext, 100);
+
     recognition.onresult = (event: any) => {
-      let allTranscripts: string[] = [];
+      const allTranscripts: string[] = [];
       for (let i = 0; i < event.results.length; i++) {
         for (let j = 0; j < event.results[i].length; j++) {
           allTranscripts.push(event.results[i][j].transcript.toLowerCase());
         }
       }
-      if (allTranscripts.some(t => t.includes(cue.toLowerCase()))) {
+      if (allTranscripts.some(t => t.toLowerCase().includes(cue.toLowerCase()))) {
         cueDetected = true;
-        if (isRunning) recognition.stop();
-      } else {
-        if (isRunning) recognition.stop();
-        // onend will trigger and call startRecognition again
-      }
-    };
-    recognition.onerror = (e: any) => {
-      if (isRunning) recognition.stop();
-      // onend will trigger and call startRecognition again
-    };
-    recognition.onend = () => {
-      isRunning = false;
-      if (cueDetected || manualNextRef.current) {
-        resolve();
-      } else {
-        setTimeout(() => {
-          startRecognition();
-        }, 200); // Small delay before restarting
+        stopAndResolve();
       }
     };
 
-    startRecognition();
+    recognition.onerror = () => {
+      if (!cueDetected && !manualNextRef.current) {
+        recognition.start(); // recover quickly
+      }
+    };
+
+    recognition.onend = () => {
+      if (!cueDetected && !manualNextRef.current && !resolved) {
+        recognition.start(); // keep listening
+      }
+    };
+
+    recognition.start();
+    
+    // Cleanup when done
+    const cleanup = () => {
+      clearInterval(manualCheckInterval);
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+    };
+    const wrappedResolve = () => {
+      cleanup();
+      resolve();
+    };
   });
 }
 
@@ -301,14 +326,6 @@ export default function RehearsePage() {
             <span className="mr-2">{line.character}:</span>
             <span>{line.dialog}</span>
             <span className="ml-2 italic">{line.emotion && `(${line.emotion})`}</span>
-            {/* Debug indicator for cached audio */}
-            {line.character !== character && audioCache.current.has(idx) && (
-              <span className="ml-2 text-xs opacity-50">🎵</span>
-            )}
-            {/* Debug indicator for generating audio */}
-            {line.character !== character && generatingAudio.current.has(idx) && (
-              <span className="ml-2 text-xs opacity-50">🔄</span>
-            )}
           </div>
         ))}
       </div>
