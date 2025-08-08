@@ -151,6 +151,7 @@ PHASE 1 - VERIFICATION & CLEANUP:
    - Author names, credits, timestamps
    - Standalone action lines (not parenthetical dialog actions)
    - Any line that's not actual character speech
+   - Any directions or moments that are not part of dialogs like Pause etc.
 
 3. KEEP & FIX VALID DIALOG:
    - Character name followed by spoken dialog
@@ -175,6 +176,7 @@ PHASE 2 - ENRICHMENT (for valid dialog lines only):
    - If not unique, use last 2-3 words until unique  
    - Avoid names, punctuation, trivial words ("huh", "wow", "yeah")
    - Convert to lowercase
+   - Avoid fullstops or commas that might be at the end of sentences
    - Must be a clear, distinctive trigger phrase
 
 OUTPUT FORMAT for each valid dialog line:
