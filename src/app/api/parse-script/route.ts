@@ -2,14 +2,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
 import { OpenAI } from "openai";
-// import PDFParser from 'pdf2json';
-// import path from "path";
-import fs from "fs/promises";
-// import os from "os";
-// import pdfPoppler from "pdf-poppler";
+// import fs from "fs/promises";
 import { Buffer } from "buffer";
-
-
+import pdf from "pdf-extraction";
 
 // Disable Next.js default body parser for file uploads
 export const config = {
@@ -20,51 +15,16 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-
-// Helper: Convert PDF buffer to images (one per page)
-// async function pdfBufferToImages(buffer: Buffer): Promise<string[]> {
-//   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pdf-"));
-//   console.log("tempDir", tempDir);
-//   const pdfPath = path.join(tempDir, "input.pdf");
-//   await fs.writeFile(pdfPath, buffer);
-//   const fileName = "/Users/snehagupta/Desktop/ai-reader/client/TECHNICIAN.pdf";
-
-//   const options = {
-//     format: "png",
-//     out_dir: path.dirname(fileName),
-//     out_prefix: "page",
-//     page: null, // all pages
-//     scale: 2.0,
-//   };
-//   console.log(options);
-//   console.log(pdfPath);
-//   await pdfPoppler.convert(pdfPath, options);
-
-//   const files = await fs.readdir(tempDir);
-//   const imagePaths = files
-//     .filter((f) => f.endsWith(".png"))
-//     .map((f) => path.join(tempDir, f));
-//   console.log(imagePaths);
-//   return imagePaths;
-// }
-
-// async function pdfBufferToImages2(buffer: Buffer): Promise<string[]> {
-//   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pdf-to-img-"));
-//   const pdfPath = path.join(tempDir, "input.pdf");
-//   console.log("pdfPath", pdfPath);
-//   await fs.writeFile(pdfPath, buffer);
-
-//   const images: string[] = [];
-//   let counter = 1;
-//   for await (const image of await pdf(pdfPath, { scale: 3 })) {
-//     console.log("image", image);
-//     const imagePath = path.join(tempDir, `page${counter}.png`);
-//     await fs.writeFile(imagePath, image);
-//     images.push(imagePath);
-//     counter++;
-//   }
-//   return images;
-// }
+// Interface for parsed dialog lines
+interface DialogLine {
+  id?: number;
+  character: string;
+  dialog: string;
+  action: string;
+  emotion?: string;
+  cue?: string;
+  rawText: string; // Keep original for reference
+}
 
 // Helper: Read the raw body from the request
 async function readRawBody(req: NextRequest): Promise<Buffer> {
@@ -80,197 +40,313 @@ async function readRawBody(req: NextRequest): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-// Helper: Encode image file to base64
-async function encodeImage(imagePath: string): Promise<string> {
-  const data = await fs.readFile(imagePath);
-  return data.toString("base64");
+// Basic text-based dialog parser
+function parseScriptText(rawText: string): DialogLine[] {
+  const lines = rawText.split('\n');
+  const dialogs: DialogLine[] = [];
+  
+  let currentCharacter = '';
+  let currentDialog = '';
+  let currentAction = '';
+  let inDialogBlock = false;
+  let dialogBuffer: string[] = [];
+  
+  // Common script formatting patterns
+  const characterNamePattern = /^[A-Z][A-Z\s]+(?:\s*\(CONT'D\))?$/;
+  const sceneHeaderPattern = /^(INT\.|EXT\.|FADE IN|FADE OUT|CUT TO|TITLE CARD|THE END)/i;
+  const actionPattern = /^\s*\([^)]*\)\s*$/;
+  const continuedPattern = /\(CONT'D\)/gi;
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if (!line) continue;
+    
+    // Skip scene headers, transitions, and title elements
+    if (sceneHeaderPattern.test(line) || 
+        line.startsWith('By') || 
+        line.match(/^\d+\.?$/) || // page numbers
+        line.length < 2) {
+      continue;
+    }
+    
+    // Check if this is a character name
+    const isCharacterName = characterNamePattern.test(line) && 
+                           !line.includes('.') && 
+                           !line.includes('?') && 
+                           !line.includes('!') &&
+                           line.length < 50; // Character names shouldn't be too long
+    
+    if (isCharacterName) {
+      // Save previous dialog if exists
+      if (currentCharacter && currentDialog) {
+        dialogs.push({
+          character: currentCharacter.replace(continuedPattern, '').trim(),
+          dialog: currentDialog.trim(),
+          action: currentAction.trim(),
+          rawText: `${currentCharacter}\n${currentAction}\n${currentDialog}`
+        });
+      }
+      
+      // Start new character dialog
+      currentCharacter = line;
+      currentDialog = '';
+      currentAction = '';
+      inDialogBlock = true;
+      continue;
+    }
+    
+    // If we're in a dialog block
+    if (inDialogBlock && currentCharacter) {
+      // Check if it's an action line (parenthetical)
+      if (actionPattern.test(line)) {
+        currentAction += (currentAction ? ' ' : '') + line;
+      } else if (line.startsWith('(') && line.endsWith(')')) {
+        // Inline action
+        currentAction += (currentAction ? ' ' : '') + line;
+      } else {
+        // It's dialog
+        currentDialog += (currentDialog ? ' ' : '') + line;
+      }
+    }
+  }
+  
+  // Don't forget the last dialog
+  if (currentCharacter && currentDialog) {
+    dialogs.push({
+      character: currentCharacter.replace(continuedPattern, '').trim(),
+      dialog: currentDialog.trim(),
+      action: currentAction.trim(),
+      rawText: `${currentCharacter}\n${currentAction}\n${currentDialog}`
+    });
+  }
+  
+  // Add sequential IDs
+  dialogs.forEach((dialog, index) => {
+    dialog.id = index + 1;
+  });
+  
+  return dialogs;
 }
 
-// Helper: Extract JSON from image using OpenAI Vision
-async function extractJsonFromImage(imagePath: string,  sequenceBoolean: number): Promise<any> {
-  const base64Image = await encodeImage(imagePath);
+// Combined AI verification, cleanup, and enrichment in batches
+async function verifyCleanupAndEnrichBatch(dialogs: DialogLine[], originalTextSample: string): Promise<DialogLine[]> {
+  if (dialogs.length === 0) return [];
+  
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0,
       response_format: { type: "json_object" },
       messages: [
         {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `This is a png file of a play script, you are tasked to extract the character name, the action and the dialog and convert it into a json output under a list name \"lines\", each roll of the script represent the sequence of the line, when one roll have two characters and lines run in parallel, it indicate the two characters will speak at the same time. Add \"squence\" to the data output with a boolean \"1\" and \"0\", each roll will switch betwern 1 and 0, if two or more people speak together, they share the same number to indicate they should speak together, the sequence start with \"${sequenceBoolean}\". The following is an example of the output: \n\n  \"squence\": \"\",\n  \"character\": \"\",\n  \"action\": \"\",\n  \"dialog\": \"\"\n\n`,
-            },
-            {
-              type: "image_url",
-              image_url: { url: `data:image/png;base64,${base64Image}` },
-            },
-          ],
+          role: "system",
+          content: `You are a script processing expert. Your job is to verify, clean up, and enrich parsed script data in one step.
+
+PHASE 1 - VERIFICATION & CLEANUP:
+1. MAINTAIN EXACT ORDER of valid dialog lines - Never reorder
+2. REMOVE INVALID ENTRIES that shouldn't be dialog:
+   - Scene headers (INT./EXT./FADE IN/FADE OUT/CUT TO)
+   - Stage directions not in parentheses  
+   - Title cards, chapter headings, page numbers
+   - Author names, credits, timestamps
+   - Standalone action lines (not parenthetical dialog actions)
+   - Any line that's not actual character speech
+
+3. KEEP & FIX VALID DIALOG:
+   - Character name followed by spoken dialog
+   - Parenthetical actions within dialog blocks
+   - Merge split dialog lines for same character
+   - Separate incorrectly combined character lines
+   - Clean character names (remove CONT'D, fix capitalization)
+
+4. VALIDATE CHARACTER NAMES:
+   - Must be actual character names, not scene descriptions
+   - Remove any that are clearly not characters
+   - Maintain the character name exactly as it is in script but make it uppercase.
+
+PHASE 2 - ENRICHMENT (for valid dialog lines only):
+1. Add 'emotion': How the line should be delivered based on context:
+   - Consider scene context and character relationships
+   - Use descriptive emotions: "angrily", "sadly", "confidently", "nervously", "mockingly", "desperately", "sarcastically", "pleadingly", etc.
+   - Base on actual dialog content and dramatic situation
+
+2. Add 'cue': Last unique word(s) from dialog for triggering next line:
+   - Usually the last word unless it appears elsewhere in dialog
+   - If not unique, use last 2-3 words until unique  
+   - Avoid names, punctuation, trivial words ("huh", "wow", "yeah")
+   - Convert to lowercase
+   - Must be a clear, distinctive trigger phrase
+
+OUTPUT FORMAT for each valid dialog line:
+{
+  "id": sequential_number_starting_from_1,
+  "character": "cleaned_character_name",
+  "dialog": "actual_spoken_words_exactly_as_written",
+  "action": "parenthetical_actions_only",
+  "emotion": "delivery_emotion",
+  "cue": "trigger_phrase"
+}
+
+Return ONLY valid, cleaned, enriched dialog lines in given JSON format in correct order.`
         },
-      ],
+        {
+          role: "user",
+          content: `Process this batch of parsed script data. Remove invalid entries, fix parsing errors, and enrich valid dialog lines with emotions and cues.
+
+PARSED BATCH TO PROCESS:
+${JSON.stringify({ lines: dialogs }, null, 2)}`
+        }
+      ]
     });
-    const jsonOutput = response.choices[0].message.content;
-    return JSON.parse(jsonOutput || '{}');
+
+    const jsonString = response.choices[0].message.content;
+    if (!jsonString) {
+      throw new Error("Empty response from OpenAI processing");
+    }
+
+    const processed = JSON.parse(jsonString);
+    const processedDialogs = processed.lines || [];
+    
+    console.log(`Batch processed: ${dialogs.length} → ${processedDialogs.length} lines`);
+    
+    return processedDialogs;
   } catch (e) {
-    console.error("Error extracting JSON from image:", e);
-    return null;
+    console.error("Error in combined processing:", e);
+    // Return original dialogs if processing fails
+    return dialogs;
   }
 }
 
-// Helper: Combine page JSONs
-function combinePageJson(pageJsonList: any[]): any {
-  const combined: any[] = [];
-  for (const pageJson of pageJsonList) {
-    const lines = pageJson?.lines || [];
-    combined.push(...lines);
+// Process all dialogs in batches with combined verification and enrichment
+async function processAllDialogs(dialogs: DialogLine[], originalText: string): Promise<DialogLine[]> {
+  const BATCH_SIZE = dialogs.length > 45 ? 30 : dialogs.length; // Can be slightly larger since we're doing one API call per batch
+  const processedDialogs: DialogLine[] = [];
+  
+  // Get a sample of original text for context (first 1500 chars to stay within limits)
+  const textSample = originalText.substring(0, 1500);
+  
+  for (let i = 0; i < dialogs.length; i += BATCH_SIZE) {
+    const batch = dialogs.slice(i, i + BATCH_SIZE);
+    console.log(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(dialogs.length/BATCH_SIZE)}`);
+    
+    const processedBatch = await verifyCleanupAndEnrichBatch(batch, textSample);
+    processedDialogs.push(...processedBatch);
+    
+    // Small delay to avoid rate limits
+    if (i + BATCH_SIZE < dialogs.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
-  return { lines: combined };
+  
+  // Reassign sequential IDs across all batches
+  processedDialogs.forEach((dialog, index) => {
+    dialog.id = index + 1;
+  });
+  
+  return processedDialogs;
 }
 
-// Helper: Add ids, emotion, and cues using OpenAI
-async function addIdsAndCuesToJson(inputJson: any): Promise<any> {
-  const systemPrompt = `You are an expert at processing play scripts. Given the following JSON input which contains a 'lines' array, update each entry as follows:\n1. Add an 'id' field before \"character\" with a number starting at 1, incrementing by 1 for each entry, placed before the 'character' field.\n2. Add a new 'emotion' field after the \"dialog\", based on the scene and the story, assign an emotion adjective to describe the voice of that line (such as angrily, peacefully, happily etc)\n3. Add a new field called 'cue' at the end. The 'cue' is a trigger word or phrase extracted from the end of the 'dialog'. The cue should normally be the last word of the dialog. However, if that word appears elsewhere in the dialog (at the start or in the middle), append the preceding word until a unique trigger phrase is found. If two words are not enough, add three and so on. The cue should not be a name, punctuation mark or a trivial word such as 'huh', 'wow', or 'ha ha'. The cue should be all in lower case. Return the updated JSON output with the new fields for each line.`;
-  const userMessage = `Input JSON:\n\n${JSON.stringify(inputJson, null, 2)}`;
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "developer", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-    });
-    const outputJsonStr = response.choices[0].message.content;
-    return JSON.parse(outputJsonStr || '{}');
-  } catch (e) {
-    console.error("Error adding ids/cues:", e);
-    return null;
+// Simplified validation function for the combined approach
+function validateProcessing(original: DialogLine[], processed: DialogLine[]): {isValid: boolean, issues: string[]} {
+  const issues: string[] = [];
+  
+  // Check if processing removed too many lines (might indicate over-filtering)
+  if (processed.length < original.length * 0.3) {
+    issues.push(`Processing removed ${original.length - processed.length} lines (${Math.round((1 - processed.length/original.length) * 100)}% of original) - possible over-filtering`);
   }
+  
+  // Validate that all processed lines have required fields
+  for (let i = 0; i < processed.length; i++) {
+    const line = processed[i];
+    if (!line.character || !line.dialog) {
+      issues.push(`Line ${i + 1} missing required character or dialog field`);
+    }
+    if (!line.emotion || !line.cue) {
+      issues.push(`Line ${i + 1} missing enrichment fields (emotion or cue)`);
+    }
+  }
+  
+  const isValid = issues.length === 0;
+  return { isValid, issues };
+}
+
+// Clean and normalize text before processing
+function preprocessText(rawText: string): string {
+  return rawText
+    // Remove excessive whitespace
+    .replace(/\s{3,}/g, '\n\n')
+    // Normalize line breaks
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    // Remove page breaks and form feeds
+    .replace(/\f/g, '\n')
+    // Clean up common OCR artifacts
+    .replace(/[^\x20-\x7E\n]/g, ' ')
+    .trim();
 }
 
 export async function POST(req: NextRequest) {
-  // Fallback sample array
- const sampleScript = {
-    lines: [
-      {
-        id: 1,
-        character: "GABE",
-        action: "",
-        dialog: "I'll bet mobs of rioting Sudanese look pretty good right now.",
-        emotion: "sarcastic",
-        cue: "right now"
-      },
-      {
-        id: 2,
-        character: "PEN",
-        action: "",
-        dialog: "You have no idea. (TO PATIENT) Hello, Mr--",
-        emotion: "matter-of-fact",
-        cue: "Mr--"
-      },
-      {
-        id: 3,
-        character: "GABE",
-        action: "",
-        dialog: "Rodriguez. Fell off a chair.",
-        emotion: "dry",
-        cue: "chair"
-      },
-      {
-        id: 4,
-        character: "MR. RODRIGUEZ",
-        action: "",
-        dialog: "I hate hospitals. Really hate them.",
-        emotion: "nervous",
-        cue: "them"
-      },
-      {
-        id: 5,
-        character: "DR. LARA",
-        action: "enters the room, glancing at the chart",
-        dialog: "And yet here you are, breaking chairs like it's a sport.",
-        emotion: "wry",
-        cue: "sport"
-      },
-      {
-        id: 6,
-        character: "MR. RODRIGUEZ",
-        action: "",
-        dialog: "I swear it slipped. Not my fault this time.",
-        emotion: "defensive",
-        cue: "time"
-      },
-      {
-        id: 7,
-        character: "PEN",
-        action: "raises an eyebrow at GABE",
-        dialog: "That sounds oddly familiar.",
-        emotion: "dry",
-        cue: "familiar"
-      },
-      {
-        id: 8,
-        character: "GABE",
-        action: "shrugs",
-        dialog: "It’s the chairs, man. They're out to get us.",
-        emotion: "mock-serious",
-        cue: "us"
-      },
-      {
-        id: 9,
-        character: "DR. LARA",
-        action: "smirks, checking vitals",
-        dialog: "Next time, aim for a beanbag. Much safer.",
-        emotion: "teasing",
-        cue: "safer"
-      },
-      {
-        id: 10,
-        character: "MR. RODRIGUEZ",
-        action: "",
-        dialog: "Noted. Will avoid furniture with legs.",
-        emotion: "resigned",
-        cue: "legs"
-      }
-    ]
-  };
-  
-
   try {
+    console.log("Starting optimized script parsing...");
+    
     // 1. Read PDF buffer from request
     const buffer = await readRawBody(req);
     if (!buffer || buffer.length === 0) throw new Error("No PDF uploaded");
-    console.log("buffer", buffer);
-
-    // 2. Convert PDF to images
-    // const imagePaths = await pdfBufferToImages(buffer);
-    // const imagePaths = await pdfBufferToImages2(buffer);
-    // console.log("imagePaths2", imagePaths);
-    // if (!imagePaths || imagePaths.length === 0) throw new Error("PDF to image conversion failed");
-    // console.log("imagePaths", imagePaths);
-
-    // // 3. Extract JSON from each image
-    // const allPageJson: any[] = [];
-    // let sequenceBoolean = 0;
-    // for (const imagePath of imagePaths) {
-    //   const pageJson = await extractJsonFromImage(imagePath,  sequenceBoolean);
-    //   if (pageJson) allPageJson.push(pageJson);
-    //   sequenceBoolean = sequenceBoolean === 0 ? 1 : 0;
-    // }
-    // console.log("allPageJson", allPageJson);
-    // if (allPageJson.length === 0) throw new Error("No JSON extracted from images");
-
-    // // 4. Combine JSONs
-    // const combinedJson = combinePageJson(allPageJson);
-    // console.log("combinedJson", combinedJson);
-    // // 5. Add ids, emotion, cues
-    // const updatedJson = await addIdsAndCuesToJson(combinedJson);
-    // console.log("updatedJson", updatedJson);
-    // if (!updatedJson) throw new Error("Post-processing failed");
-
-    return NextResponse.json(sampleScript);
-  } catch (e) {
-    console.error("parse-script fallback due to error:", e);
-    return NextResponse.json(sampleScript);
+    
+    // 2. Extract text from PDF
+    const data = await pdf(buffer);
+    console.log("Extracted text length:", data.text.length);
+    
+    // 3. Preprocess the raw text
+    const cleanText = preprocessText(data.text);
+    console.log("Clean text preview:", cleanText.substring(0, 500));
+    
+    // 4. Basic parsing to extract dialog structure
+    console.log("Step 1: Basic pattern-based parsing...");
+    const basicParsing = parseScriptText(cleanText);
+    console.log(`Basic parsing found ${basicParsing.length} potential dialog lines`);
+    
+    if (basicParsing.length === 0) {
+      throw new Error("No dialog lines found in basic parsing");
+    }
+    
+    // 5. Combined AI verification, cleanup, and enrichment
+    console.log("Step 2: AI verification, cleanup, and enrichment...");
+    const processedDialogs = await processAllDialogs(basicParsing, cleanText);
+    console.log(`Processing completed: ${basicParsing.length} → ${processedDialogs.length} final dialog lines`);
+    
+    if (processedDialogs.length === 0) {
+      throw new Error("No valid dialog lines found after processing");
+    }
+    
+    // 6. Final validation
+    const validation = validateProcessing(basicParsing, processedDialogs);
+    
+    if (!validation.isValid) {
+      console.warn("Validation issues detected:", validation.issues);
+    }
+    
+    const result = {
+      lines: processedDialogs,
+      stats: {
+        originalLines: basicParsing.length,
+        finalLines: processedDialogs.length,
+        removedLines: basicParsing.length - processedDialogs.length,
+        processingEfficiency: Math.round((processedDialogs.length / basicParsing.length) * 100) + "%"
+      },
+      validation: validation
+    };
+    
+    console.log("Script parsing completed successfully");
+    console.log("Final stats:", result.stats);
+    
+    return NextResponse.json(result);
+    
+  } catch (e: any) {
+    console.error("parse-script error:", e);
+    return NextResponse.json({ 
+      error: e.message,
+      stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
-} 
+}
