@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@aws-sdk/client-textract": "^3.863.0",
     "@elevenlabs/elevenlabs-js": "^2.5.0",
     "dotenv": "^17.1.0",
     "formidable": "^3.5.4",
@@ -16,6 +17,7 @@
     "next": "^15.3.5",
     "openai": "^5.8.2",
     "pdf-extraction": "^1.0.2",
+    "pdf-lib": "^1.17.1",
     "react": "^18",
     "react-dom": "^18",
     "react-pdf": "^10.0.1"
