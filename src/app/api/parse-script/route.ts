@@ -57,15 +57,6 @@ async function splitPdfIntoPages(pdfBuffer: Buffer): Promise<Buffer[]> {
   return pages;
 }
 
-function isInside(inner: any, outer: any) {
-  return (
-    inner.Top >= outer.Top &&
-    inner.Left >= outer.Left &&
-    inner.Top + inner.Height <= outer.Top + outer.Height &&
-    inner.Left + inner.Width <= outer.Left + outer.Width
-  );
-}
-
 function mergeNestedBlocks(finalData: any[]) {
   // Helper: check if boxB is inside boxA
   function isInside(boxA: any, boxB: any) {
@@ -113,9 +104,9 @@ function processTextract(response: any) {
 
   const finalData: any[] = []
   response.Blocks.forEach((block: any) => {
-    if (block.BlockType === "LAYOUT_TEXT" || block.BlockType === "LAYOUT_HEADER") {
+    if (block.BlockType !== "PAGE" && block.BlockType !== "WORD" && block.BlockType !== "LINE" && block.BlockType !== "LAYOUT_FIGURE") {
       const blockText:string[] = []
-      block.Relationships[0]?.Ids?.forEach((id: string) => {
+      block.Relationships?.[0]?.Ids?.forEach((id: string) => {
         const childBlock = response.Blocks.find((b: any) => b.Id === id);
         if (childBlock) {
           let text = "";
@@ -192,6 +183,9 @@ export async function extractTextFromTextract(pdfBuffer: Buffer): Promise<any> {
       const megedResult = mergeNestedBlocks(results)
       const sortedResult = sortBlocksReadingOrder(megedResult)
       finalResult = [...finalResult, ...sortedResult]
+      if(pdfBuffer.length > 2) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
     }
 
     return finalResult.map(item => item.blockText)
