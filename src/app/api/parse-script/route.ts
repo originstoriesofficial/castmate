@@ -4,7 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { OpenAI } from "openai";
 // import fs from "fs/promises";
 import { Buffer } from "buffer";
-import pdf from "pdf-extraction";
+import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
+import { PDFDocument } from "pdf-lib";
 
 // Disable Next.js default body parser for file uploads
 export const config = {
@@ -40,98 +41,191 @@ async function readRawBody(req: NextRequest): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-// Basic text-based dialog parser
-function parseScriptText(rawText: string): DialogLine[] {
-  const lines = rawText.split('\n');
-  const dialogs: DialogLine[] = [];
-  
-  let currentCharacter = '';
-  let currentDialog = '';
-  let currentAction = '';
-  let inDialogBlock = false;
-  let dialogBuffer: string[] = [];
-  
-  // Common script formatting patterns
-  const characterNamePattern = /^[A-Z][A-Z\s]+(?:\s*\(CONT'D\))?$/;
-  const sceneHeaderPattern = /^(INT\.|EXT\.|FADE IN|FADE OUT|CUT TO|TITLE CARD|THE END)/i;
-  const actionPattern = /^\s*\([^)]*\)\s*$/;
-  const continuedPattern = /\(CONT'D\)/gi;
-  
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i].trim();
-    if (!line) continue;
-    
-    // Skip scene headers, transitions, and title elements
-    if (sceneHeaderPattern.test(line) || 
-        line.startsWith('By') || 
-        line.match(/^\d+\.?$/) || // page numbers
-        line.length < 2) {
-      continue;
-    }
-    
-    // Check if this is a character name
-    const isCharacterName = characterNamePattern.test(line) && 
-                           !line.includes('.') && 
-                           !line.includes('?') && 
-                           !line.includes('!') &&
-                           line.length < 50; // Character names shouldn't be too long
-    
-    if (isCharacterName) {
-      // Save previous dialog if exists
-      if (currentCharacter && currentDialog) {
-        dialogs.push({
-          character: currentCharacter.replace(continuedPattern, '').trim(),
-          dialog: currentDialog.trim(),
-          action: currentAction.trim(),
-          rawText: `${currentCharacter}\n${currentAction}\n${currentDialog}`
-        });
-      }
-      
-      // Start new character dialog
-      currentCharacter = line;
-      currentDialog = '';
-      currentAction = '';
-      inDialogBlock = true;
-      continue;
-    }
-    
-    // If we're in a dialog block
-    if (inDialogBlock && currentCharacter) {
-      // Check if it's an action line (parenthetical)
-      if (actionPattern.test(line)) {
-        currentAction += (currentAction ? ' ' : '') + line;
-      } else if (line.startsWith('(') && line.endsWith(')')) {
-        // Inline action
-        currentAction += (currentAction ? ' ' : '') + line;
-      } else {
-        // It's dialog
-        currentDialog += (currentDialog ? ' ' : '') + line;
-      }
-    }
+async function splitPdfIntoPages(pdfBuffer: Buffer): Promise<Buffer[]> {
+  const fullDoc = await PDFDocument.load(pdfBuffer);
+  const totalPages = fullDoc.getPageCount();
+  const pages: Buffer[] = [];
+
+  for (let i = 0; i < totalPages; i++) {
+    const newDoc = await PDFDocument.create();
+    const [page] = await newDoc.copyPages(fullDoc, [i]);
+    newDoc.addPage(page);
+    const singlePageBytes = await newDoc.save();
+    pages.push(Buffer.from(singlePageBytes));
   }
-  
-  // Don't forget the last dialog
-  if (currentCharacter && currentDialog) {
-    dialogs.push({
-      character: currentCharacter.replace(continuedPattern, '').trim(),
-      dialog: currentDialog.trim(),
-      action: currentAction.trim(),
-      rawText: `${currentCharacter}\n${currentAction}\n${currentDialog}`
-    });
-  }
-  
-  // Add sequential IDs
-  dialogs.forEach((dialog, index) => {
-    dialog.id = index + 1;
-  });
-  
-  return dialogs;
+
+  return pages;
 }
 
+function mergeNestedBlocks(finalData: any[]) {
+  // Helper: check if boxB is inside boxA
+  function isInside(boxA: any, boxB: any) {
+    return (
+      boxB.Left >= boxA.Left &&
+      boxB.Top >= boxA.Top &&
+      boxB.Left + boxB.Width <= boxA.Left + boxA.Width &&
+      boxB.Top + boxB.Height <= boxA.Top + boxA.Height
+    );
+  }
+
+  const merged: any[] = [];
+  const usedChildIds = new Set<string>();
+
+  for (let i = 0; i < finalData.length; i++) {
+    const parent = finalData[i];
+
+    // Skip if this block was already merged into another
+    if (usedChildIds.has(parent.Id)) continue;
+
+    const parentBox = parent.Geometry.BoundingBox;
+
+    // Find children inside parent
+    for (let j = 0; j < finalData.length; j++) {
+      if (i === j) continue;
+      const child = finalData[j];
+
+      if (
+        !usedChildIds.has(child.Id) &&
+        isInside(parentBox, child.Geometry.BoundingBox)
+      ) {
+        parent.blockText.push(...child.blockText);
+        usedChildIds.add(child.Id);
+      }
+    }
+
+    merged.push(parent);
+  }
+
+  return merged;
+}
+
+function processTextract(response: any) {
+  if (!response.Blocks) return [];
+
+  const finalData: any[] = []
+  response.Blocks.forEach((block: any) => {
+    if (block.BlockType !== "PAGE" && block.BlockType !== "WORD" && block.BlockType !== "LINE" && block.BlockType !== "LAYOUT_FIGURE") {
+      const blockText:string[] = []
+      block.Relationships?.[0]?.Ids?.forEach((id: string) => {
+        const childBlock = response.Blocks.find((b: any) => b.Id === id);
+        if (childBlock) {
+          let text = "";
+          childBlock.Relationships?.[0]?.Ids?.forEach((wordId:string) => {
+            const wordBlock = response.Blocks.find((b: any) => b.Id === wordId);
+            if (wordBlock && wordBlock.Confidence > 50) {
+              text += " " + wordBlock.Text;
+            }
+          })
+          blockText.push(text)
+        }
+      });
+      if (blockText.length > 0) {
+        finalData.push({
+          ...block, blockText
+        })
+      }
+    }
+  });
+
+
+  return finalData;
+}
+
+const sortBlocksReadingOrder = (blocks: any[], tolerance = 0.01) => {
+  return [...blocks].sort((a, b) => {
+    const aBBox = a.Geometry.BoundingBox;
+    const bBBox = b.Geometry.BoundingBox;
+    
+    // Calculate vertical centers and ranges
+    const aCenterY = aBBox.Top + (aBBox.Height / 2);
+    const bCenterY = bBBox.Top + (bBBox.Height / 2);
+    
+    // Check for vertical overlap (blocks on potentially same line)
+    const aBottom = aBBox.Top + aBBox.Height;
+    const bBottom = bBBox.Top + bBBox.Height;
+    const verticalOverlap = Math.max(0, Math.min(aBottom, bBottom) - Math.max(aBBox.Top, bBBox.Top));
+    const minHeight = Math.min(aBBox.Height, bBBox.Height);
+    const overlapRatio = verticalOverlap / minHeight;
+    
+    // If significant vertical overlap (likely same line), sort by left position
+    if (overlapRatio > 0.3) { // 30% overlap threshold
+      return aBBox.Left - bBBox.Left;
+    }
+    
+    // If centers are very close (within tolerance), use left position
+    if (Math.abs(aCenterY - bCenterY) <= tolerance) {
+      return aBBox.Left - bBBox.Left;
+    }
+    
+    // Otherwise sort by vertical center (top to bottom)
+    return aCenterY - bCenterY;
+  });
+};
+
+
+
+export async function extractTextFromTextract(pdfBuffer: Buffer): Promise<any> {
+  // Read from result.json file instead of calling AWS Textract
+  try {
+      const client = new TextractClient({ region: process.env.AWS_REGION });
+
+    const pageBuffers = await splitPdfIntoPages(pdfBuffer);
+    let finalResult:any[] = [];
+
+    for (let i = 0; i < pageBuffers.length; i++) {
+      const command = new AnalyzeDocumentCommand({
+        Document: { Bytes: pageBuffers[i] },
+        FeatureTypes: ["LAYOUT"],
+      });
+
+      const response:any = await client.send(command);
+      const results  = processTextract(response)
+      const megedResult = mergeNestedBlocks(results)
+      const sortedResult = sortBlocksReadingOrder(megedResult)
+      finalResult = [...finalResult, ...sortedResult]
+      if(pdfBuffer.length > 2) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    return finalResult.map(item => item.blockText)
+
+    // Import fs dynamically to use in server-side code
+    const fs = require('fs');
+    const path = require('path');
+    
+    // Path to the result.json file
+    const resultPath = path.join(process.cwd(), 'src/app/api/parse-script/result.json');
+    
+    // Read the file synchronously
+    const response = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+
+        // Path to the result.json file
+        const resultPath2 = path.join(process.cwd(), 'src/app/api/parse-script/result2.json');
+    
+        // Read the file synchronously
+        const response2 = JSON.parse(fs.readFileSync(resultPath2, 'utf8'));
+    
+    
+    const precessedData1 = processTextract(response)
+    const precessedData2 = processTextract(response2)
+    const mergedOutput1 = mergeNestedBlocks(precessedData1)
+    const mergedOutput2 = mergeNestedBlocks(precessedData2)
+    const sortOrder1 = sortBlocksReadingOrder(mergedOutput1)
+    const sortOrder2 = sortBlocksReadingOrder(mergedOutput2)
+    return [...sortOrder1, ...sortOrder2].map(item => item.blockText)
+    // return mergedOutput
+  } catch (error) {
+    console.error("Error reading result.json:", error);
+    throw error;
+  }
+}
+
+
 // Combined AI verification, cleanup, and enrichment in batches
-async function verifyCleanupAndEnrichBatch(dialogs: DialogLine[], originalTextSample: string): Promise<DialogLine[]> {
+async function verifyCleanupAndEnrichBatch(dialogs: DialogLine[]): Promise<DialogLine[]> {
   if (dialogs.length === 0) return [];
-  
+
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -140,63 +234,78 @@ async function verifyCleanupAndEnrichBatch(dialogs: DialogLine[], originalTextSa
       messages: [
         {
           role: "system",
-          content: `You are a script processing expert. Your job is to verify, clean up, and enrich parsed script data in one step.
+          content: `You are an expert script parser designed to extract dialog from messy AWS Textract output with 100% accuracy.
 
-PHASE 1 - VERIFICATION & CLEANUP:
-1. MAINTAIN EXACT ORDER of valid dialog lines - Never reorder
-2. REMOVE INVALID ENTRIES that shouldn't be dialog:
-   - Scene headers (INT./EXT./FADE IN/FADE OUT/CUT TO)
-   - Stage directions not in parentheses  
-   - Title cards, chapter headings, page numbers
-   - Author names, credits, timestamps
-   - Standalone action lines (not parenthetical dialog actions)
-   - Any line that's not actual character speech
-   - Any directions or moments that are not part of dialogs like Pause etc.
+INPUT: Fragmented text arrays from PDF script extraction where dialog lines may be split, duplicated, or mixed with metadata.
 
-3. KEEP & FIX VALID DIALOG:
-   - Character name followed by spoken dialog
-   - Parenthetical actions within dialog blocks
-   - Merge split dialog lines for same character
-   - Separate incorrectly combined character lines
-   - Clean character names (remove CONT'D, fix capitalization)
+CRITICAL RULES FOR 100% ACCURACY:
 
-4. VALIDATE CHARACTER NAMES:
-   - Must be actual character names, not scene descriptions
-   - Remove any that are clearly not characters
-   - Maintain the character name exactly as it is in script but make it uppercase.
+## PHASE 1: TEXT RECONSTRUCTION
+1. **FLATTEN AND MERGE**: Combine all text fragments into a coherent sequence
+2. **IDENTIFY PATTERNS**: Look for character names and their respective dialog content
+3. **HANDLE FRAGMENTS**: Piece together split dialog lines that belong together
+4. **PRESERVE ORDER**: Maintain the original sequence of actual dialog
 
-PHASE 2 - ENRICHMENT (for valid dialog lines only):
-1. Add 'emotion': How the line should be delivered based on context:
-   - Consider scene context and character relationships
-   - Use descriptive emotions: "angrily", "sadly", "confidently", "nervously", "mockingly", "desperately", "sarcastically", "pleadingly", etc.
-   - Base on actual dialog content and dramatic situation
+## PHASE 2: CHARACTER NAME DETECTION
+A valid character name is:
+- ALL CAPS or Capitalized name
+- Followed by dialog content (not stage directions)
+- NOT any of these EXCLUSIONS:
+  * Scene markers: "SCENE", "INT.", "EXT.", "FADE", "CUT TO"
+  * Technical terms: "EXISTING", "ADDITIONAL", "CONTINUE", "END"
+  * Metadata: timestamps, page numbers, service names
+  * Action descriptions without character context
+  * Single words that are clearly not names
 
-2. Add 'cue': Last unique word(s) from dialog for triggering next line:
-   - Usually the last word unless it appears elsewhere in dialog
-   - If not unique, use last 2-3 words until unique  
-   - Avoid names, punctuation, trivial words ("huh", "wow", "yeah")
-   - Convert to lowercase
-   - Avoid fullstops or commas that might be at the end of sentences
-   - Must be a clear, distinctive trigger phrase
+## PHASE 3: DIALOG EXTRACTION
+For each valid CHARACTER + DIALOG pair:
+1. **Character**: Clean the name (remove "CONT'D", fix formatting, make uppercase)
+2. **Dialog**: Extract the exact spoken words
+3. **Action**: Only include parenthetical stage directions within dialog blocks
+4. **Skip**: Any line that isn't actual character speech
 
-OUTPUT FORMAT for each valid dialog line:
-{
-  "id": sequential_number_starting_from_1,
-  "character": "cleaned_character_name",
-  "dialog": "actual_spoken_words_exactly_as_written",
-  "action": "parenthetical_actions_only",
-  "emotion": "delivery_emotion",
-  "cue": "trigger_phrase"
-}
+## PHASE 4: ENRICHMENT
+For each valid dialog line add:
+- **Emotion**: Infer from context and content (urgent, confused, authoritative, panicked, etc.)
+- **Cue**: Last unique word(s) for line triggering (2-4 words, lowercase, no punctuation)
 
-Return ONLY valid, cleaned, enriched dialog lines in given JSON format in correct order.`
+## EXAMPLES OF WHAT TO SKIP:
+❌ "SCENE 232"
+❌ "EXISTING:"
+❌ "Sides by Breakdown Services"
+❌ Timestamps and metadata
+❌ Standalone action lines
+
+## OUTPUT FORMAT:
+Return ONLY an array of valid dialog objects:
+
+[
+  {
+    "id": 1,
+    "character": "CHARACTER_NAME",
+    "dialog": "exact spoken words",
+    "action": "parenthetical actions only or empty string",
+    "emotion": "inferred emotion",
+    "cue": "unique trigger phrase"
+  }
+]
+
+## QUALITY CHECKS:
+- Every entry MUST have actual spoken dialog
+- Character names MUST be real characters, not scene elements
+- Maintain exact original dialog text
+- Ensure cues are unique and meaningful
+- No metadata, timestamps, or technical markers in output
+
+Process the input and return ONLY the JSON array of valid dialog lines.
+Example output: {lines: [{A valid output object}, {A valid output object}, ...]}`
         },
         {
           role: "user",
-          content: `Process this batch of parsed script data. Remove invalid entries, fix parsing errors, and enrich valid dialog lines with emotions and cues.
+          content: `Process this batch of script data.
 
-PARSED BATCH TO PROCESS:
-${JSON.stringify({ lines: dialogs }, null, 2)}`
+Data TO PROCESS:
+${JSON.stringify({ lines: dialogs })}`
         }
       ]
     });
@@ -208,9 +317,7 @@ ${JSON.stringify({ lines: dialogs }, null, 2)}`
 
     const processed = JSON.parse(jsonString);
     const processedDialogs = processed.lines || [];
-    
-    console.log(`Batch processed: ${dialogs.length} → ${processedDialogs.length} lines`);
-    
+
     return processedDialogs;
   } catch (e) {
     console.error("Error in combined processing:", e);
@@ -220,133 +327,71 @@ ${JSON.stringify({ lines: dialogs }, null, 2)}`
 }
 
 // Process all dialogs in batches with combined verification and enrichment
-async function processAllDialogs(dialogs: DialogLine[], originalText: string): Promise<DialogLine[]> {
-  const BATCH_SIZE = dialogs.length > 45 ? 30 : dialogs.length; // Can be slightly larger since we're doing one API call per batch
+async function processAllDialogs(dialogs: DialogLine[]): Promise<DialogLine[]> {
+  const BATCH_SIZE = dialogs.length > 60 ? 45 : dialogs.length; // Can be slightly larger since we're doing one API call per batch
   const processedDialogs: DialogLine[] = [];
-  
+
   // Get a sample of original text for context (first 1500 chars to stay within limits)
-  const textSample = originalText.substring(0, 1500);
-  
+  // const textSample = originalText.substring(0, 1500);
+
   for (let i = 0; i < dialogs.length; i += BATCH_SIZE) {
     const batch = dialogs.slice(i, i + BATCH_SIZE);
-    console.log(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(dialogs.length/BATCH_SIZE)}`);
-    
-    const processedBatch = await verifyCleanupAndEnrichBatch(batch, textSample);
+    console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(dialogs.length / BATCH_SIZE)}`);
+
+    const processedBatch = await verifyCleanupAndEnrichBatch(batch);
     processedDialogs.push(...processedBatch);
-    
+
     // Small delay to avoid rate limits
     if (i + BATCH_SIZE < dialogs.length) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
-  
+
   // Reassign sequential IDs across all batches
   processedDialogs.forEach((dialog, index) => {
     dialog.id = index + 1;
   });
-  
+
   return processedDialogs;
-}
-
-// Simplified validation function for the combined approach
-function validateProcessing(original: DialogLine[], processed: DialogLine[]): {isValid: boolean, issues: string[]} {
-  const issues: string[] = [];
-  
-  // Check if processing removed too many lines (might indicate over-filtering)
-  if (processed.length < original.length * 0.3) {
-    issues.push(`Processing removed ${original.length - processed.length} lines (${Math.round((1 - processed.length/original.length) * 100)}% of original) - possible over-filtering`);
-  }
-  
-  // Validate that all processed lines have required fields
-  for (let i = 0; i < processed.length; i++) {
-    const line = processed[i];
-    if (!line.character || !line.dialog) {
-      issues.push(`Line ${i + 1} missing required character or dialog field`);
-    }
-    if (!line.emotion || !line.cue) {
-      issues.push(`Line ${i + 1} missing enrichment fields (emotion or cue)`);
-    }
-  }
-  
-  const isValid = issues.length === 0;
-  return { isValid, issues };
-}
-
-// Clean and normalize text before processing
-function preprocessText(rawText: string): string {
-  return rawText
-    // Remove excessive whitespace
-    .replace(/\s{3,}/g, '\n\n')
-    // Normalize line breaks
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    // Remove page breaks and form feeds
-    .replace(/\f/g, '\n')
-    // Clean up common OCR artifacts
-    .replace(/[^\x20-\x7E\n]/g, ' ')
-    .trim();
 }
 
 export async function POST(req: NextRequest) {
   try {
     console.log("Starting optimized script parsing...");
-    
+
     // 1. Read PDF buffer from request
     const buffer = await readRawBody(req);
     if (!buffer || buffer.length === 0) throw new Error("No PDF uploaded");
-    
-    // 2. Extract text from PDF
-    const data = await pdf(buffer);
-    console.log("Extracted text length:", data.text.length);
-    
-    // 3. Preprocess the raw text
-    const cleanText = preprocessText(data.text);
-    console.log("Clean text preview:", cleanText.substring(0, 500));
-    
-    // 4. Basic parsing to extract dialog structure
-    console.log("Step 1: Basic pattern-based parsing...");
-    const basicParsing = parseScriptText(cleanText);
-    console.log(`Basic parsing found ${basicParsing.length} potential dialog lines`);
-    
-    if (basicParsing.length === 0) {
-      throw new Error("No dialog lines found in basic parsing");
+
+    // 2. Extract text from PDF (now using cached result.json)
+    const textractText = await extractTextFromTextract(buffer);
+    console.log("Textract extracted text length:", textractText.length);
+
+    // return NextResponse.json(textractText);
+
+    if (!textractText) {
+      throw new Error("No text extracted from PDF");
     }
-    
+
     // 5. Combined AI verification, cleanup, and enrichment
     console.log("Step 2: AI verification, cleanup, and enrichment...");
-    const processedDialogs = await processAllDialogs(basicParsing, cleanText);
-    console.log(`Processing completed: ${basicParsing.length} → ${processedDialogs.length} final dialog lines`);
-    
+    const processedDialogs = await processAllDialogs(textractText);
+
     if (processedDialogs.length === 0) {
       throw new Error("No valid dialog lines found after processing");
     }
-    
-    // 6. Final validation
-    const validation = validateProcessing(basicParsing, processedDialogs);
-    
-    if (!validation.isValid) {
-      console.warn("Validation issues detected:", validation.issues);
-    }
-    
+
     const result = {
       lines: processedDialogs,
-      stats: {
-        originalLines: basicParsing.length,
-        finalLines: processedDialogs.length,
-        removedLines: basicParsing.length - processedDialogs.length,
-        processingEfficiency: Math.round((processedDialogs.length / basicParsing.length) * 100) + "%"
-      },
-      validation: validation
     };
-    
+
     console.log("Script parsing completed successfully");
-    console.log("Final stats:", result.stats);
-    
+
     return NextResponse.json(result);
-    
+
   } catch (e: any) {
     console.error("parse-script error:", e);
-    return NextResponse.json({ 
+    return NextResponse.json({
       error: e.message,
       stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
     });
