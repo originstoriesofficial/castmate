@@ -119,7 +119,7 @@ function FeatureWithImage({
       <div className="flex-1 flex justify-center w-full">
         <div className="sticky top-24 rounded-3xl overflow-hidden shadow-2xl border-4 border-[#a13d2d] bg-[#f5eddd] p-4 w-full max-w-2xl">
           <img
-            src="/mascot.jpg"
+            src={image}
             alt={title}
             className="w-full h-auto rounded-2xl object-cover"
           />
@@ -208,13 +208,14 @@ function HowItWorksSteps() {
   );
 }
 
+// --- Home Page ---
 export default function Home() {
   return (
     <div className="min-h-screen flex flex-col" style={{ background: CREAM }}>
       <Hero />
       <FeatureWithImage
         title="Available 24/7"
-        desc={`Run line 24/7.\nFocus without relying on someone else's help.`}
+        desc={`Run lines 24/7.\nFocus without relying on someone else's help.`}
         icon={<Clock size={36} strokeWidth={2.5} />}
         image="/mascot.jpg"
       />
