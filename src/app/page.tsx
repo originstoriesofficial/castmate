@@ -1,7 +1,6 @@
 /* eslint-disable @next/next/no-img-element */
 import { Clock, Mic, Ear } from "lucide-react";
 
-// Color palette based on mascot image
 const CREAM = "#f5eddd";
 const RETRO_RED = "#a13d2d";
 
@@ -14,7 +13,7 @@ function Hero() {
     >
       <div className="flex flex-col md:flex-row items-center gap-12">
         <img
-          src="/mascot.png" // Place mascot image inside public/mascot.png
+          src="https://www.shutterstock.com/image-vector/microphone-mascot-illustration-cartoon-2475995729.jpg"
           alt="Retro Mascot"
           className="w-64 h-64 object-contain rounded-2xl border-4 border-[#a13d2d] bg-[#f5eddd] shadow-xl"
         />
@@ -25,7 +24,9 @@ function Hero() {
           >
             Your 24/7
             <br />
-            <span style={{ color: RETRO_RED, fontStyle: "italic" }}>
+            <span
+              style={{ color: RETRO_RED, fontStyle: "italic" }}
+            >
               Castmate.
             </span>
           </h1>
@@ -144,9 +145,8 @@ function HowToUse() {
         How to use <span style={{ fontStyle: "italic" }}>ScenePartner</span>
       </h2>
       <div className="rounded-3xl overflow-hidden shadow-2xl border-4 border-[#a13d2d] bg-[#f5eddd] p-4 max-w-4xl w-full flex justify-center">
-        {/* Placeholder for video or image */}
         <img
-          src="/mascot.png"
+          src="https://www.shutterstock.com/image-vector/microphone-mascot-illustration-cartoon-2475995729.jpg"
           alt="How to use ScenePartner"
           className="w-full h-auto rounded-2xl object-cover"
         />
@@ -216,22 +216,22 @@ export default function Home() {
       <Hero />
       <FeatureWithImage
         title="Available 24/7"
-        desc={`Run lines 24/7.\nFocus without relying on someone else's help.`}
+        desc={`Run line 24/7.\nFocus without relying on someone else's help.`}
         icon={<Clock size={36} strokeWidth={2.5} />}
-        image="/mascot.png"
+        image="https://www.shutterstock.com/image-vector/microphone-mascot-illustration-cartoon-2475995729.jpg"
       />
       <FeatureWithImage
         title="Realistic Voices"
-        desc={`Clear, natural sounding voices just like a human reader.\n\nAdditional features coming soon to help you get the results you want.`}
+        desc={`Clear, natural sounding voices just like a human reader.\n\n Additional features coming soon to help you get the results you want.`}
         icon={<Mic size={36} strokeWidth={2.5} />}
-        image="/mascot.png"
+        image="https://www.shutterstock.com/image-vector/microphone-mascot-illustration-cartoon-2475995729.jpg"
         reverse
       />
       <FeatureWithImage
         title="Listens & Responds"
-        desc={`Castmate is intuitive and responsive.\n\nYour reader listens and responds in real time, so you can focus on getting the tape.`}
+        desc={`Castmate is intuitive and responsive.\n\n Your reader listens and responds in real time, so you can focus on getting the tape.`}
         icon={<Ear size={36} strokeWidth={2.5} />}
-        image="/mascot.png"
+        image="https://www.shutterstock.com/image-vector/microphone-mascot-illustration-cartoon-2475995729.jpg"
       />
       <HowToUse />
       <HowItWorksSteps />
