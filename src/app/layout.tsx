@@ -20,7 +20,7 @@ const CREAM = '#f5eddd';
 const RETRO_RED = '#a13d2d';
 
 export const metadata: Metadata = {
-  title: 'Scene Partner',
+  title: 'Castmate',
   description: 'AI-powered line reader for actors',
 };
 
@@ -32,7 +32,7 @@ function Navbar() {
           <Mic size={32} color={RETRO_RED} />
         </span>
         <span className="text-2xl font-black" style={{ color: RETRO_RED, fontFamily: 'serif' }}>
-          <Link href="/">iReader</Link>
+          <Link href="/">Castmate</Link>
         </span>
       </div>
       <div className="flex gap-6 items-center">
