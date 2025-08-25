@@ -85,10 +85,13 @@ function waitForCue(
         }
       }
 
-      console.log("🗣️ User said:", transcripts.join(" | "));
-      console.log("🎯 Looking for cue:", cue.toLowerCase());
+      // ⬇️ Clean cue: remove anything in parentheses at end
+      const cleanedCue = cue.replace(/\s*\([^)]*\)\s*$/, '').toLowerCase();
 
-      if (transcripts.some((t) => t.includes(cue.toLowerCase()))) {
+      console.log("🗣️ User said:", transcripts.join(" | "));
+      console.log("🎯 Looking for cue:", cleanedCue);
+
+      if (transcripts.some((t) => t.includes(cleanedCue))) {
         console.log("✅ Cue matched — proceeding to next line.");
         stopAndResolve();
       }
@@ -338,8 +341,9 @@ export default function RehearsePage() {
             style={{ fontFamily: line.character === character ? 'serif' : 'monospace' }}
           >
             <span className="mr-2">{line.character}:</span>
-            <span>{line.dialog}</span>
-            <span className="ml-2 italic">{line.emotion && `(${line.emotion})`}</span>
+            <span> {line.dialog.replace(/\s*\([^)]*\)\s*$/, '')}
+            </span>
+
           </div>
         ))}
       </div>
