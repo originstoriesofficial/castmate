@@ -31,73 +31,87 @@ function initRecognition(): any {
   return recognitionInstance;
 }
 
-function waitForCue(cue: string, manualNextRef: React.MutableRefObject<boolean>): Promise<void> {
+function waitForCue(
+  cue: string,
+  manualNextRef: React.MutableRefObject<boolean>
+): Promise<void> {
   return new Promise((resolve) => {
     const recognition = initRecognition();
     if (!recognition) {
+      console.warn("Speech recognition not supported.");
       resolve();
       return;
     }
 
-    let cueDetected = false;
     let resolved = false;
+    let running = false;
 
     const stopAndResolve = () => {
       if (!resolved) {
         resolved = true;
-        recognition.stop();
+        if (running) recognition.stop();
+        cleanup();
         resolve();
       }
     };
 
-    // Manual override watcher
-    const checkManualNext = () => {
+    const manualCheckInterval = setInterval(() => {
       if (manualNextRef.current) {
-        cueDetected = true;
+        console.log("Manual override triggered");
         stopAndResolve();
       }
-    };
+    }, 100);
 
-    const manualCheckInterval = setInterval(checkManualNext, 100);
+    const timeout = setTimeout(() => {
+      console.warn("Cue not detected within 15 seconds. Auto-continuing.");
+      stopAndResolve();
+    }, 15000); // fallback timer
 
-    recognition.onresult = (event: any) => {
-      const allTranscripts: string[] = [];
-      for (let i = 0; i < event.results.length; i++) {
-        for (let j = 0; j < event.results[i].length; j++) {
-          allTranscripts.push(event.results[i][j].transcript.toLowerCase());
-        }
-      }
-      if (allTranscripts.some(t => t.toLowerCase().includes(cue.toLowerCase()))) {
-        cueDetected = true;
-        stopAndResolve();
-      }
-    };
-
-    recognition.onerror = () => {
-      if (!cueDetected && !manualNextRef.current) {
-        recognition.start(); // recover quickly
-      }
+    recognition.onstart = () => {
+      running = true;
+      console.log("🎤 Speech recognition started");
     };
 
     recognition.onend = () => {
-      if (!cueDetected && !manualNextRef.current && !resolved) {
-        recognition.start(); // keep listening
+      running = false;
+      console.log("🛑 Speech recognition ended");
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcripts: string[] = [];
+      for (let i = 0; i < event.results.length; i++) {
+        for (let j = 0; j < event.results[i].length; j++) {
+          transcripts.push(event.results[i][j].transcript.toLowerCase());
+        }
+      }
+
+      console.log("🗣️ User said:", transcripts.join(" | "));
+      console.log("🎯 Looking for cue:", cue.toLowerCase());
+
+      if (transcripts.some((t) => t.includes(cue.toLowerCase()))) {
+        console.log("✅ Cue matched — proceeding to next line.");
+        stopAndResolve();
       }
     };
 
-    recognition.start();
-    
-    // Cleanup when done
+    recognition.onerror = (e: any) => {
+      console.error("❌ Speech recognition error:", e.error);
+    };
+
     const cleanup = () => {
       clearInterval(manualCheckInterval);
+      clearTimeout(timeout);
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
     };
-    const wrappedResolve = () => {
-      cleanup();
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error("❌ SpeechRecognition failed to start:", err);
       resolve();
-    };
+    }
   });
 }
 
