@@ -206,25 +206,53 @@ export default function RehearsePage() {
   const playLine = async (idx: number) => {
     if (!script || !character) return;
     const line = script.lines[idx];
+  
+    // Only play audio for other characters (not the user)
     if (line.character !== character) {
-      const cachedUrl = audioCache.current.get(idx);
-      if (cachedUrl) {
-        if (audioRef.current) audioRef.current.src = cachedUrl;
-        await audioRef.current?.play();
-      } else {
-        const res = await fetch('/api/generate-audio', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: line.dialog, character: line.character }),
-        });
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        if (audioRef.current) audioRef.current.src = url;
-        await audioRef.current?.play();
+      let audioUrl = audioCache.current.get(idx);
+  
+      // If not cached, generate and cache it
+      if (!audioUrl) {
+        try {
+          const res = await fetch('/api/generate-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: line.dialog, character: line.character }),
+          });
+  
+          if (!res.ok) {
+            console.error(`Audio generation failed for line ${idx}:`, await res.text());
+            return;
+          }
+  
+          const blob = await res.blob();
+          audioUrl = URL.createObjectURL(blob);
+          audioCache.current.set(idx, audioUrl);
+        } catch (err) {
+          console.error(`Audio generation error for line ${idx}:`, err);
+          return;
+        }
+      }
+  
+      // Fetch the audio manually to bypass Vercel bot protection
+      try {
+        const response = await fetch(audioUrl);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const audio = new Audio(objectUrl);
+  
+        await audio.play();
+  
+        // Optional: revoke URL after playback ends
+        audio.onended = () => {
+          URL.revokeObjectURL(objectUrl);
+        };
+      } catch (err) {
+        console.error(`Playback failed for line ${idx}:`, err);
       }
     }
   };
-
+  
   const handlePlay = async () => {
     setShowRestart(false);
     for (let i = 3; i > 0; i--) {
