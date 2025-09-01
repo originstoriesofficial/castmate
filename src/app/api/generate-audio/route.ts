@@ -25,6 +25,9 @@ export async function POST(req: Request) {
       });
     }
 
+    // ✂️ Remove text in parentheses before TTS
+    const cleanText = text.replace(/\([^)]*\)/g, '').trim();
+
     // Determine character gender using OpenAI
     const completion = await openai.chat.completions.create({
       model: 'gpt-4',
@@ -56,7 +59,7 @@ export async function POST(req: Request) {
         Accept: 'audio/mpeg',
       },
       body: JSON.stringify({
-        text,
+        text: cleanText,
         model_id: 'eleven_multilingual_v2',
         output_format: 'mp3_44100_128',
       }),
