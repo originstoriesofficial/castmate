@@ -4,6 +4,8 @@
 "use client";
 import React, { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { startLiveTranscription } from "@/utils/assemblyai";
+
 
 const CREAM = '#f5eddd';
 const RETRO_RED = '#a13d2d';
@@ -15,103 +17,47 @@ declare global {
   }
 }
 
-let recognitionInstance: any = null;
-
-function initRecognition(): any {
-  if (typeof window === 'undefined') return null;
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) return null;
-
-  if (!recognitionInstance) {
-    recognitionInstance = new SpeechRecognition();
-    recognitionInstance.continuous = true;
-    recognitionInstance.interimResults = false;
-    recognitionInstance.lang = 'en-US';
-  }
-  return recognitionInstance;
-}
-
 function waitForCue(cue: string, manualNextRef: React.MutableRefObject<boolean>): Promise<void> {
   return new Promise((resolve) => {
-    const recognition = initRecognition();
-    if (!recognition) {
-      console.warn("Speech recognition not supported.");
-      resolve();
-      return;
-    }
-
+    const cleanedCue = cue.replace(/\s*\([^)]*\)\s*$/, "").toLowerCase();
     let resolved = false;
-    let running = false;
 
-    const stopAndResolve = () => {
-      if (!resolved) {
-        resolved = true;
-        if (running) recognition.stop();
+    const stop = startLiveTranscription((text) => {
+      const userSpeech = text.toLowerCase();
+      console.log("🗣️ Detected:", userSpeech);
+      if (userSpeech.includes(cleanedCue)) {
+        console.log("✅ Cue matched — proceeding.");
         cleanup();
         resolve();
       }
-    };
+    });
 
-    const manualCheckInterval = setInterval(() => {
-      if (manualNextRef.current) {
-        console.log("Manual override triggered");
-        stopAndResolve();
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        console.warn("⏱️ Cue not detected in time — auto-continuing.");
+        cleanup();
+        resolve();
+      }
+    }, 15000);
+
+    const manualInterval = setInterval(() => {
+      if (manualNextRef.current && !resolved) {
+        console.log("🧍 Manual override");
+        cleanup();
+        resolve();
       }
     }, 100);
 
-    const timeout = setTimeout(() => {
-      console.warn("Cue not detected within 15 seconds. Auto-continuing.");
-      stopAndResolve();
-    }, 15000);
-
-    recognition.onstart = () => {
-      running = true;
-      console.log("🎤 Speech recognition started");
-    };
-
-    recognition.onend = () => {
-      running = false;
-      console.log("🛑 Speech recognition ended");
-    };
-
-    recognition.onresult = (event: any) => {
-      const transcripts: string[] = [];
-      for (let i = 0; i < event.results.length; i++) {
-        for (let j = 0; j < event.results[i].length; j++) {
-          transcripts.push(event.results[i][j].transcript.toLowerCase());
-        }
-      }
-
-      const cleanedCue = cue.replace(/\s*\([^)]*\)\s*$/, '').toLowerCase();
-      console.log("🗣️ User said:", transcripts.join(" | "));
-      console.log("🎯 Looking for cue:", cleanedCue);
-
-      if (transcripts.some((t) => t.includes(cleanedCue))) {
-        console.log("✅ Cue matched — proceeding to next line.");
-        stopAndResolve();
-      }
-    };
-
-    recognition.onerror = (e: any) => {
-      console.error("❌ Speech recognition error:", e.error);
-    };
-
     const cleanup = () => {
-      clearInterval(manualCheckInterval);
+      if (resolved) return;
+      resolved = true;
+      stop(); // stop AssemblyAI transcription
       clearTimeout(timeout);
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
+      clearInterval(manualInterval);
     };
-
-    try {
-      recognition.start();
-    } catch (err) {
-      console.error("❌ SpeechRecognition failed to start:", err);
-      resolve();
-    }
   });
 }
+
 
 export default function RehearsePage() {
   const [script, setScript] = useState<any>(null);
