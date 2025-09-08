@@ -1,40 +1,11 @@
 const ASSEMBLYAI_API_KEY = process.env.NEXT_PUBLIC_ASSEMBLYAI_API_KEY as string;
 
 export async function startLiveTranscription(onTranscript: (text: string) => void) {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  // ✅ Request mic access immediately — inside user-triggered function
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-  // ✅ iOS Safari fallback to native webkitSpeechRecognition
-  if (isIOS && typeof window !== "undefined" && "webkitSpeechRecognition" in window) {
-    const recognition = new (window as any).webkitSpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let finalTranscript = "";
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
-        }
-      }
-      if (finalTranscript) {
-        console.log("🗣️ You said (iOS):", finalTranscript);
-        onTranscript(finalTranscript.trim());
-      }
-    };
-
-    recognition.onerror = (err: any) => {
-      console.error("❌ iOS SpeechRecognition error:", err);
-    };
-
-    recognition.start();
-
-    return () => recognition.stop();
-  }
-
-  // ✅ Non-iOS: Use AssemblyAI real-time WebSocket
   const socket = new WebSocket(
-    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000`,
+    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${ASSEMBLYAI_API_KEY}`,
     []
   );
 
@@ -46,7 +17,6 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
     console.log("✅ WebSocket connected to AssemblyAI");
 
     context = new AudioContext({ sampleRate: 16000 });
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     source = context.createMediaStreamSource(stream);
 
     processor = context.createScriptProcessor(4096, 1, 1);
@@ -90,6 +60,7 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
     return buf.buffer;
   }
 
+  // ✅ Return stop function
   return () => {
     socket.close();
   };
