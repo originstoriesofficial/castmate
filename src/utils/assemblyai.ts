@@ -1,18 +1,33 @@
 const ASSEMBLYAI_API_KEY = process.env.NEXT_PUBLIC_ASSEMBLYAI_API_KEY as string;
 
-export async function startLiveTranscription(onTranscript: (text: string) => void) {
-  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
+// 🔑 fetch temporary realtime token from AssemblyAI
+async function fetchRealtimeToken(): Promise<string> {
+  const res = await fetch("https://api.assemblyai.com/v2/realtime/token", {
+    method: "POST",
+    headers: { authorization: ASSEMBLYAI_API_KEY },
+  });
+  if (!res.ok) throw new Error("Failed to fetch AssemblyAI token");
+  const data = await res.json();
+  return data.token;
+}
 
-  if (isIOS && window.webkitSpeechRecognition) {
+export async function startLiveTranscription(
+  onTranscript: (text: string) => void
+) {
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+
+  // ✅ fallback: iOS Safari local recognition
+  if (isIOS && (window as any).webkitSpeechRecognition) {
     console.log("📱 Using webkitSpeechRecognition on iOS Safari");
 
-    const recognition = new window.webkitSpeechRecognition();
+    const recognition = new (window as any).webkitSpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = false;
     recognition.lang = "en-US";
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results[event.results.length - 1][0].transcript.trim();
+    recognition.onresult = (event: any) => {
+      const transcript =
+        event.results[event.results.length - 1][0].transcript.trim();
       console.log("🗣️ iOS transcript:", transcript);
       onTranscript(transcript);
     };
@@ -29,19 +44,20 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
     };
   }
 
-  // ✅ All other browsers (Chrome, etc.) use AssemblyAI
+  // ✅ All other browsers → AssemblyAI Realtime
+  const token = await fetchRealtimeToken();
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
   const socket = new WebSocket(
-    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${ASSEMBLYAI_API_KEY}`
+    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${token}`
   );
 
-  let context: AudioContext;
-  let processor: ScriptProcessorNode;
-  let source: MediaStreamAudioSourceNode;
+  let context: AudioContext | null = null;
+  let source: MediaStreamAudioSourceNode | null = null;
+  let processor: ScriptProcessorNode | null = null;
 
   socket.onopen = () => {
-    console.log("✅ WebSocket connected to AssemblyAI");
+    console.log("✅ Connected to AssemblyAI Realtime");
 
     context = new AudioContext({ sampleRate: 16000 });
     source = context.createMediaStreamSource(stream);
@@ -79,17 +95,16 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
   };
 
   function convertFloat32ToInt16(buffer: Float32Array) {
-    let l = buffer.length;
-    const buf = new Int16Array(l);
-    while (l--) {
-      buf[l] = Math.min(1, buffer[l]) * 0x7fff;
+    const buf = new Int16Array(buffer.length);
+    for (let i = 0; i < buffer.length; i++) {
+      buf[i] = Math.max(-1, Math.min(1, buffer[i])) * 0x7fff;
     }
     return buf.buffer;
   }
 
   return () => {
     socket.close();
-    stream.getTracks().forEach(track => track.stop());
+    stream.getTracks().forEach((t) => t.stop());
     console.log("🛑 Assembly transcription stopped");
   };
 }
