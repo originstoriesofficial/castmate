@@ -1,12 +1,41 @@
 const ASSEMBLYAI_API_KEY = process.env.NEXT_PUBLIC_ASSEMBLYAI_API_KEY as string;
 
 export async function startLiveTranscription(onTranscript: (text: string) => void) {
-  // ✅ Request mic access immediately — inside user-triggered function
+  // Detect iPhone or iPad
+  const isIOS = typeof window !== "undefined" && /iPhone|iPad|iPod/.test(navigator.userAgent);
+
+  if (isIOS && "webkitSpeechRecognition" in window) {
+    console.log("📱 Using webkitSpeechRecognition on iOS Safari");
+
+    const recognition = new window.webkitSpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0].transcript)
+        .join("");
+      console.log("🗣️ iOS transcript:", transcript);
+      onTranscript(transcript);
+    };
+
+    recognition.onerror = (event) => {
+      console.error("❌ iOS SpeechRecognition error:", event.error);
+    };
+
+    recognition.start();
+
+    return () => {
+      recognition.stop();
+    };
+  }
+
+  // Fallback: Use AssemblyAI WebSocket
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
   const socket = new WebSocket(
-    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${ASSEMBLYAI_API_KEY}`,
-    []
+    `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${ASSEMBLYAI_API_KEY}`
   );
 
   let context: AudioContext;
@@ -35,7 +64,7 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
   socket.onmessage = (message) => {
     const res = JSON.parse(message.data);
     if (res.text) {
-      console.log("🗣️ You said:", res.text);
+      console.log("🗣️ Assembly transcript:", res.text);
       onTranscript(res.text);
     }
   };
@@ -60,7 +89,6 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
     return buf.buffer;
   }
 
-  // ✅ Return stop function
   return () => {
     socket.close();
   };
