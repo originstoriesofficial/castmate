@@ -1,10 +1,9 @@
 const ASSEMBLYAI_API_KEY = process.env.NEXT_PUBLIC_ASSEMBLYAI_API_KEY as string;
 
 export async function startLiveTranscription(onTranscript: (text: string) => void) {
-  // Detect iPhone or iPad
-  const isIOS = typeof window !== "undefined" && /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
 
-  if (isIOS && "webkitSpeechRecognition" in window) {
+  if (isIOS && window.webkitSpeechRecognition) {
     console.log("📱 Using webkitSpeechRecognition on iOS Safari");
 
     const recognition = new window.webkitSpeechRecognition();
@@ -13,14 +12,12 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
     recognition.lang = "en-US";
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = Array.from(event.results)
-        .map((result) => result[0].transcript)
-        .join("");
+      const transcript = event.results[event.results.length - 1][0].transcript.trim();
       console.log("🗣️ iOS transcript:", transcript);
       onTranscript(transcript);
     };
 
-    recognition.onerror = (event) => {
+    recognition.onerror = (event: any) => {
       console.error("❌ iOS SpeechRecognition error:", event.error);
     };
 
@@ -28,10 +25,11 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
 
     return () => {
       recognition.stop();
+      console.log("🛑 iOS recognition stopped");
     };
   }
 
-  // Fallback: Use AssemblyAI WebSocket
+  // ✅ All other browsers (Chrome, etc.) use AssemblyAI
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
   const socket = new WebSocket(
@@ -42,13 +40,13 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
   let processor: ScriptProcessorNode;
   let source: MediaStreamAudioSourceNode;
 
-  socket.onopen = async () => {
+  socket.onopen = () => {
     console.log("✅ WebSocket connected to AssemblyAI");
 
     context = new AudioContext({ sampleRate: 16000 });
     source = context.createMediaStreamSource(stream);
-
     processor = context.createScriptProcessor(4096, 1, 1);
+
     source.connect(processor);
     processor.connect(context.destination);
 
@@ -91,5 +89,7 @@ export async function startLiveTranscription(onTranscript: (text: string) => voi
 
   return () => {
     socket.close();
+    stream.getTracks().forEach(track => track.stop());
+    console.log("🛑 Assembly transcription stopped");
   };
 }
