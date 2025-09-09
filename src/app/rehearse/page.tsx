@@ -4,8 +4,6 @@
 "use client";
 import React, { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { startLiveTranscription } from "@/utils/assemblyai";
-
 
 const CREAM = '#f5eddd';
 const RETRO_RED = '#a13d2d';
@@ -17,47 +15,108 @@ declare global {
   }
 }
 
-function waitForCue(cue: string, manualNextRef: React.MutableRefObject<boolean>): Promise<void> {
+let recognitionInstance: any = null;
+
+function initRecognition(): any {
+  if (typeof window === 'undefined') return null;
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) return null;
+
+  if (!recognitionInstance) {
+    recognitionInstance = new SpeechRecognition();
+    recognitionInstance.continuous = true; // allow natural pauses
+    recognitionInstance.interimResults = false;
+    recognitionInstance.lang = 'en-US';
+  }
+  return recognitionInstance;
+}
+
+function waitForCue(
+  cue: string,
+  manualNextRef: React.MutableRefObject<boolean>
+): Promise<void> {
   return new Promise((resolve) => {
-    const cleanedCue = cue.replace(/\s*\([^)]*\)\s*$/, "").toLowerCase();
+    const recognition = initRecognition();
+    if (!recognition) {
+      console.warn("Speech recognition not supported.");
+      resolve();
+      return;
+    }
+
     let resolved = false;
+    let running = false;
 
-    const stop = startLiveTranscription((text) => {
-      const userSpeech = text.toLowerCase();
-      console.log("🗣️ Detected:", userSpeech);
-      if (userSpeech.includes(cleanedCue)) {
-        console.log("✅ Cue matched — proceeding.");
-        cleanup();
-        resolve();
-      }
-    });
-
-    const timeout = setTimeout(() => {
+    const stopAndResolve = () => {
       if (!resolved) {
-        console.warn("⏱️ Cue not detected in time — auto-continuing.");
+        resolved = true;
+        if (running) recognition.stop();
         cleanup();
         resolve();
       }
-    }, 15000);
+    };
 
-    const manualInterval = setInterval(() => {
-      if (manualNextRef.current && !resolved) {
-        console.log("🧍 Manual override");
-        cleanup();
-        resolve();
+    const manualCheckInterval = setInterval(() => {
+      if (manualNextRef.current) {
+        console.log("Manual override triggered");
+        stopAndResolve();
       }
     }, 100);
 
-    const cleanup = () => {
-      if (resolved) return;
-      resolved = true;
-      stop(); // stop AssemblyAI transcription
-      clearTimeout(timeout);
-      clearInterval(manualInterval);
+    const timeout = setTimeout(() => {
+      console.warn("Cue not detected within 15 seconds. Auto-continuing.");
+      stopAndResolve();
+    }, 15000); // fallback timer
+
+    recognition.onstart = () => {
+      running = true;
+      console.log("🎤 Speech recognition started");
     };
+
+    recognition.onend = () => {
+      running = false;
+      console.log("🛑 Speech recognition ended");
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcripts: string[] = [];
+      for (let i = 0; i < event.results.length; i++) {
+        for (let j = 0; j < event.results[i].length; j++) {
+          transcripts.push(event.results[i][j].transcript.toLowerCase());
+        }
+      }
+
+      // ⬇️ Clean cue: remove anything in parentheses at end
+      const cleanedCue = cue.replace(/\s*\([^)]*\)\s*$/, '').toLowerCase();
+
+      console.log("🗣️ User said:", transcripts.join(" | "));
+      console.log("🎯 Looking for cue:", cleanedCue);
+
+      if (transcripts.some((t) => t.includes(cleanedCue))) {
+        console.log("✅ Cue matched — proceeding to next line.");
+        stopAndResolve();
+      }
+    };
+
+    recognition.onerror = (e: any) => {
+      console.error("❌ Speech recognition error:", e.error);
+    };
+
+    const cleanup = () => {
+      clearInterval(manualCheckInterval);
+      clearTimeout(timeout);
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error("❌ SpeechRecognition failed to start:", err);
+      resolve();
+    }
   });
 }
-
 
 export default function RehearsePage() {
   const [script, setScript] = useState<any>(null);
@@ -71,6 +130,7 @@ export default function RehearsePage() {
   const [showRestart, setShowRestart] = useState(false);
   const router = useRouter();
 
+  // Audio cache and background generation
   const audioCache = useRef<Map<number, string>>(new Map());
   const generatingAudio = useRef<Set<number>>(new Set());
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
@@ -84,15 +144,20 @@ export default function RehearsePage() {
     }
   }, []);
 
+  // Generate audio for a specific line
   const generateAudioForLine = async (lineIndex: number) => {
     if (!script || !character || generatingAudio.current.has(lineIndex) || audioCache.current.has(lineIndex)) {
       return;
     }
 
     const line = script.lines[lineIndex];
-    if (line.character === character) return;
+    if (line.character === character) {
+      return; // Skip user's lines
+    }
 
     generatingAudio.current.add(lineIndex);
+    console.log(`Starting audio generation for line ${lineIndex}: "${line.dialog}"`);
+
     try {
       const res = await fetch('/api/generate-audio', {
         method: 'POST',
@@ -108,6 +173,7 @@ export default function RehearsePage() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       audioCache.current.set(lineIndex, url);
+      console.log(`Audio cached for line ${lineIndex}`);
     } catch (err) {
       console.error(`Audio generation error for line ${lineIndex}:`, err);
     } finally {
@@ -115,8 +181,11 @@ export default function RehearsePage() {
     }
   };
 
+  // Initialize background audio generation for first 5 non-character lines
   const initializeAudioGeneration = async () => {
     if (!script || !character) return;
+
+    console.log("Initializing audio cache for first 5 non-character lines...");
     let count = 0;
     for (let i = 0; i < script.lines.length && count < 5; i++) {
       if (script.lines[i].character !== character) {
@@ -126,12 +195,18 @@ export default function RehearsePage() {
     }
   };
 
-  const maintainAudioCache = async (currentIndex: number) => {
+  // FIXED: Maintain 5 lines ahead in cache
+  const maintainAudioCache =async (currentIndex: number) => {
     if (!script || !character) return;
+
+    // Find the next 5 non-character lines that need to be cached
     let cachedCount = 0;
-    for (let i = currentIndex; i < script.lines.length && cachedCount < 5; i++) {
+    const targetCacheCount = 5;
+    
+    for (let i = currentIndex; i < script.lines.length && cachedCount < targetCacheCount; i++) {
       if (script.lines[i].character !== character) {
         if (!audioCache.current.has(i) && !generatingAudio.current.has(i)) {
+          console.log(`Generating audio for line ${i} (maintain cache)`);
           await generateAudioForLine(i);
         }
         cachedCount++;
@@ -139,10 +214,14 @@ export default function RehearsePage() {
     }
   };
 
+  // Initialize audio generation when script loads
   useEffect(() => {
-    if (script && character) initializeAudioGeneration();
+    if (script && character) {
+      initializeAudioGeneration();
+    }
   }, [script, character]);
 
+  // Maintain cache when current line changes
   useEffect(() => {
     if (script && character && currentLineIndex >= 0) {
       maintainAudioCache(currentLineIndex);
@@ -152,68 +231,55 @@ export default function RehearsePage() {
   const playLine = async (idx: number) => {
     if (!script || !character) return;
     const line = script.lines[idx];
-  
-    // Only play audio for other characters (not the user)
     if (line.character !== character) {
-      let audioUrl = audioCache.current.get(idx);
-  
-      // If not cached, generate and cache it
-      if (!audioUrl) {
+      // Check if audio is cached
+      const cachedUrl = audioCache.current.get(idx);
+      
+      if (cachedUrl) {
+        if (audioRef.current) audioRef.current.src = cachedUrl;
+        await audioRef.current?.play();
+        console.log(`Playing cached audio for line ${idx}`);
+      } else {
+        // Fallback: generate audio on demand
+        console.log(`Audio not cached for line ${idx}, generating on demand...`);
         try {
           const res = await fetch('/api/generate-audio', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: line.dialog, character: line.character }),
           });
-  
           if (!res.ok) {
-            console.error(`Audio generation failed for line ${idx}:`, await res.text());
+            console.error("Audio generation failed for line:", idx, await res.text());
             return;
           }
-  
           const blob = await res.blob();
-          audioUrl = URL.createObjectURL(blob);
-          audioCache.current.set(idx, audioUrl);
+          const url = URL.createObjectURL(blob);
+          if (audioRef.current) audioRef.current.src = url;
+          await audioRef.current?.play();
         } catch (err) {
-          console.error(`Audio generation error for line ${idx}:`, err);
-          return;
+          console.error("Audio fetch/play error:", err);
         }
-      }
-  
-      // Fetch the audio manually to bypass Vercel bot protection
-      try {
-        const response = await fetch(audioUrl);
-        const blob = await response.blob();
-        const objectUrl = URL.createObjectURL(blob);
-        const audio = new Audio(objectUrl);
-  
-        await audio.play();
-  
-        // Optional: revoke URL after playback ends
-        audio.onended = () => {
-          URL.revokeObjectURL(objectUrl);
-        };
-      } catch (err) {
-        console.error(`Playback failed for line ${idx}:`, err);
       }
     }
   };
-  
+
   const handlePlay = async () => {
     setShowRestart(false);
+    // Countdown before starting
     for (let i = 3; i > 0; i--) {
       setCountdown(i);
       await new Promise((res) => setTimeout(res, 800));
     }
-    setCountdown(0);
+    setCountdown(0); // Show 'Go!'
     await new Promise((res) => setTimeout(res, 600));
     setCountdown(null);
     setPlaying(true);
-
+    
     for (let i = current; i < script.lines.length; i++) {
       setCurrent(i);
-      setCurrentLineIndex(i);
+      setCurrentLineIndex(i); // Update current line index for cache maintenance
       const line = script.lines[i];
+      
       if (line.character !== character) {
         await playLine(i);
         await new Promise((resolve) => {
@@ -227,7 +293,6 @@ export default function RehearsePage() {
         setWaitingForUser(false);
       }
     }
-
     setPlaying(false);
     setShowRestart(true);
   };
@@ -238,28 +303,30 @@ export default function RehearsePage() {
   };
 
   const handleRestart = () => {
-    audioCache.current.forEach((url) => URL.revokeObjectURL(url));
+    // Clear audio cache
+    audioCache.current.forEach((url) => {
+      URL.revokeObjectURL(url);
+    });
     audioCache.current.clear();
     generatingAudio.current.clear();
     setCurrentLineIndex(0);
+    
+    // Clear localStorage and redirect to upload page
     localStorage.removeItem('parsedScript');
     localStorage.removeItem('selectedCharacter');
     router.push('/upload');
   };
 
+  // Cleanup audio URLs on unmount
   useEffect(() => {
     return () => {
-      audioCache.current.forEach((url) => URL.revokeObjectURL(url));
+      audioCache.current.forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
     };
   }, []);
 
-  if (!script || !character) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: CREAM }}>
-        <span>Loading...</span>
-      </div>
-    );
-  }
+  if (!script || !character) return <div className="min-h-screen flex items-center justify-center" style={{ background: CREAM }}><span>Loading...</span></div>;
 
   return (
     <div className="min-h-screen flex flex-col items-center py-12" style={{ background: CREAM }}>
@@ -274,7 +341,9 @@ export default function RehearsePage() {
             style={{ fontFamily: line.character === character ? 'serif' : 'monospace' }}
           >
             <span className="mr-2">{line.character}:</span>
-            <span>{line.dialog.replace(/\s*\([^)]*\)\s*$/, '')}</span>
+            <span> {line.dialog.replace(/\s*\([^)]*\)\s*$/, '')}
+            </span>
+
           </div>
         ))}
       </div>
@@ -314,6 +383,8 @@ export default function RehearsePage() {
           Wanna Start Over?
         </button>
       )}
+      
+      {/* Enhanced debug info */}
       <div className="mt-4 text-xs opacity-50" style={{ color: RETRO_RED }}>
         Cached: {audioCache.current.size} | Generating: {generatingAudio.current.size} | Current Line: {currentLineIndex}
       </div>
